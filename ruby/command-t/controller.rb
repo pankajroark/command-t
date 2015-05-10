@@ -1,22 +1,65 @@
-# Copyright 2010-2014 Greg Hurrell. All rights reserved.
+# Copyright 2010-2015 Greg Hurrell. All rights reserved.
 # Licensed under the terms of the BSD 2-clause license.
-
-require 'command-t/finder/buffer_finder'
-require 'command-t/finder/jump_finder'
-require 'command-t/finder/file_finder'
-require 'command-t/finder/mru_buffer_finder'
-require 'command-t/finder/tag_finder'
-require 'command-t/match_window'
-require 'command-t/prompt'
-require 'command-t/vim/path_utilities'
-require 'command-t/util'
 
 module CommandT
   class Controller
-    include VIM::PathUtilities
+    include PathUtilities
+    include SCMUtilities
+
+    # Wraps `method` in a `rescue` clause that attempts to print some useful
+    # information to the screen before re-raising any exception. Without this,
+    # most of the useful output is unhelpfully swallowed by Vim.
+    def self.guard(method)
+      class_eval <<-END
+        alias original_#{method} #{method}
+        def #{method}(*args, &block)
+          original_#{method}(*args, &block)
+        rescue Exception => e
+          backtrace = e.backtrace
+          trimmed = backtrace.take(backtrace.length - 2)
+          text = VIM::escape_for_single_quotes trimmed.join("\n")
+          ::VIM::command "echo '\#{text}'"
+          raise e
+        end
+      END
+    end
 
     def initialize
       @prompt = Prompt.new
+
+      encoding = VIM::get_string('g:CommandTEncoding')
+      if encoding
+        begin
+          encoding = Encoding.find(encoding)
+          Encoding.default_external = encoding
+          Encoding.default_internal = encoding
+        rescue
+        end
+      end
+    end
+
+    # For possible use in status lines.
+    def active_finder
+      @active_finder && @active_finder.class.name
+    end
+
+    # For possible use in status lines.
+    def path
+      @path
+    end
+
+    # For possible use in status lines.
+    def is_own_buffer(buffer_number)
+      @match_window && buffer_number == @match_window.buffer_number
+    end
+
+    # For possible use in status lines.
+    def return_is_own_buffer(buffer_number)
+      if is_own_buffer(buffer_number)
+        ::VIM::command 'return 1'
+      else
+        ::VIM::command 'return 0'
+      end
     end
 
     def show_buffer_finder
@@ -24,24 +67,28 @@ module CommandT
       @active_finder = buffer_finder
       show
     end
+    guard :show_buffer_finder
 
     def show_jump_finder
       @path          = VIM::pwd
       @active_finder = jump_finder
       show
     end
+    guard :show_jump_finder
 
     def show_mru_finder
       @path          = VIM::pwd
       @active_finder = mru_finder
       show
     end
+    guard :show_mru_finder
 
     def show_tag_finder
       @path          = VIM::pwd
       @active_finder = tag_finder
       show
     end
+    guard :show_tag_finder
 
     def show_file_finder
       # optional parameter will be desired starting directory, or ""
@@ -68,6 +115,7 @@ module CommandT
       # probably a problem with the optional parameter
       @match_window.print_no_such_file_or_directory
     end
+    guard :show_file_finder
 
     def hide
       @match_window.leave
@@ -93,12 +141,14 @@ module CommandT
       ::VIM::command 'call setqflist([' + matches + '])'
       ::VIM::command 'cope'
     end
+    guard :quickfix
 
     def refresh
       return unless @active_finder && @active_finder.respond_to?(:flush)
       @active_finder.flush
       list_matches!
     end
+    guard :refresh
 
     def flush
       @max_height   = nil
@@ -106,6 +156,7 @@ module CommandT
       @file_finder  = nil
       @tag_finder   = nil
     end
+    guard :flush
 
     def handle_key
       key = ::VIM::evaluate('a:arg').to_i.chr
@@ -116,6 +167,7 @@ module CommandT
         @match_window.find key
       end
     end
+    guard :handle_key
 
     def backspace
       if @focus == @prompt
@@ -123,6 +175,7 @@ module CommandT
         @needs_update = true
       end
     end
+    guard :backspace
 
     def delete
       if @focus == @prompt
@@ -130,56 +183,68 @@ module CommandT
         @needs_update = true
       end
     end
+    guard :delete
 
     def accept_selection(options = {})
       selection = @match_window.selection
       hide
       open_selection(selection, options) unless selection.nil?
     end
+    guard :accept_selection
 
     def toggle_focus
       @focus.unfocus # old focus
       @focus = @focus == @prompt ? @match_window : @prompt
       @focus.focus # new focus
     end
+    guard :toggle_focus
 
     def cancel
       hide
     end
+    guard :cancel
 
     def select_next
       @match_window.select_next
     end
+    guard :select_next
 
     def select_prev
       @match_window.select_prev
     end
+    guard :select_prev
 
     def clear
       @prompt.clear!
       list_matches!
     end
+    guard :clear
 
     def clear_prev_word
       @prompt.clear_prev_word!
       list_matches!
     end
+    guard :clear_prev_word
 
     def cursor_left
       @prompt.cursor_left if @focus == @prompt
     end
+    guard :cursor_left
 
     def cursor_right
       @prompt.cursor_right if @focus == @prompt
     end
+    guard :cursor_right
 
     def cursor_end
       @prompt.cursor_end if @focus == @prompt
     end
+    guard :cursor_end
 
     def cursor_start
       @prompt.cursor_start if @focus == @prompt
     end
+    guard :cursor_start
 
     def leave
       @match_window.leave
@@ -202,6 +267,7 @@ module CommandT
 
       @needs_update = false
     end
+    guard :list_matches
 
     def tab_command
       VIM::get_string('g:CommandTAcceptSelectionTabCommand') || 'tabe'
@@ -220,7 +286,7 @@ module CommandT
     def scm_markers
       markers = VIM::get_string('g:CommandTSCMDirectories')
       markers = markers && markers.split(/\s*,\s*/)
-      markers = %w[.git .hg .svn .bzr _darcs] unless markers && markers.length
+      markers = %w[.git .hg .svn .bzr _darcs] unless markers && markers.any?
       markers
     end
 
@@ -380,7 +446,7 @@ module CommandT
           end
         else
           Array(value).each do |mapping|
-            unless mapping == '<Esc>' && term =~ /\A(screen|xterm|vt100)/
+            unless mapping == '<Esc>' && term =~ /\A(rxvt|screen|vt100|xterm)/
               map mapping, key
             end
           end
@@ -389,8 +455,8 @@ module CommandT
     end
 
     def set_up_autocmds
-      ::VIM::command 'augroup Command-T'
-      ::VIM::command 'au!'
+      ::VIM::command 'augroup CommandTController'
+      ::VIM::command 'autocmd!'
       ::VIM::command 'autocmd CursorHold <buffer> :call CommandTListMatches()'
       ::VIM::command 'augroup END'
     end
@@ -408,15 +474,15 @@ module CommandT
     end
 
     def buffer_finder
-      @buffer_finder ||= CommandT::BufferFinder.new
+      @buffer_finder ||= CommandT::Finder::BufferFinder.new
     end
 
     def mru_finder
-      @mru_finder ||= CommandT::MRUBufferFinder.new
+      @mru_finder ||= CommandT::Finder::MRUBufferFinder.new
     end
 
     def file_finder
-      @file_finder ||= CommandT::FileFinder.new nil,
+      @file_finder ||= CommandT::Finder::FileFinder.new nil,
         :max_depth              => VIM::get_number('g:CommandTMaxDepth'),
         :max_files              => VIM::get_number('g:CommandTMaxFiles'),
         :max_caches             => VIM::get_number('g:CommandTMaxCachedDirectories'),
@@ -424,15 +490,16 @@ module CommandT
         :never_show_dot_files   => VIM::get_bool('g:CommandTNeverShowDotFiles'),
         :scan_dot_directories   => VIM::get_bool('g:CommandTScanDotDirectories'),
         :wild_ignore            => VIM::get_string('g:CommandTWildIgnore'),
-        :scanner                => VIM::get_string('g:CommandTFileScanner')
+        :scanner                => VIM::get_string('g:CommandTFileScanner'),
+        :git_scan_submodules    => VIM::get_bool('g:CommandTGitScanSubmodules')
     end
 
     def jump_finder
-      @jump_finder ||= CommandT::JumpFinder.new
+      @jump_finder ||= CommandT::Finder::JumpFinder.new
     end
 
     def tag_finder
-      @tag_finder ||= CommandT::TagFinder.new \
+      @tag_finder ||= CommandT::Finder::TagFinder.new \
         :include_filenames => VIM::get_bool('g:CommandTTagIncludeFilenames')
     end
   end # class Controller

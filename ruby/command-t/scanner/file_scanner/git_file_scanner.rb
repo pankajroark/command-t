@@ -1,34 +1,54 @@
 # Copyright 2014 Greg Hurrell. All rights reserved.
 # Licensed under the terms of the BSD 2-clause license.
 
-require 'command-t/scanner/file_scanner/find_file_scanner'
-
 module CommandT
-  class FileScanner
-    # Uses git ls-files to scan for files
-    class GitFileScanner < FindFileScanner
-      def paths!
-        Dir.chdir(@path) do
-          stdin, stdout, stderr = Open3.popen3(*[
-            'git',
-            'ls-files',
-            '--exclude-standard',
-            @path
-          ])
+  class Scanner
+    class FileScanner
+      # Uses git ls-files to scan for files
+      class GitFileScanner < FindFileScanner
+        LsFilesError = Class.new(::RuntimeError)
 
-          all_files = stdout.readlines.
-            map { |path| path.chomp }.
-            reject { |path| path_excluded?(path, 0) }.
-            take(@max_files).
-            to_a
+        def paths!
+          Dir.chdir(@path) do
+            all_files = list_files(%w[git ls-files --exclude-standard -z])
 
-          # will fall back to find if not a git repository or there's an error
-          stderr.gets ? super : all_files
+            if @scan_submodules
+              base = nil
+              list_files(%w[
+                git submodule foreach --recursive
+                git ls-files --exclude-standard -z
+              ]).each do |path|
+                if path =~ /\AEntering '(.*)'\n(.*)\z/
+                  base = $~[1]
+                  path = $~[2]
+                end
+                all_files.push(base + File::SEPARATOR + path)
+              end
+            end
+
+            all_files.
+              map { |path| path.chomp }.
+              reject { |path| path_excluded?(path, 0) }.
+              take(@max_files).
+              to_a
+          end
+        rescue LsFilesError
+          super
+        rescue Errno::ENOENT
+          # git executable not present and executable
+          super
         end
-      rescue Errno::ENOENT => e
-        # git executable not present and executable
-        super
-      end
-    end # class GitFileScanner
-  end # class FileScanner
+
+      private
+
+        def list_files(command)
+          stdin, stdout, stderr = Open3.popen3(*command)
+          stdout.read.split("\0")
+        ensure
+          raise LsFilesError if stderr && stderr.gets
+        end
+
+      end # class GitFileScanner
+    end # class FileScanner
+  end # class Scanner
 end # module CommandT
