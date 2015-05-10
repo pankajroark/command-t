@@ -29,7 +29,7 @@ module CommandT
     #   :limit (integer): limit the number of returned matches
     def sorted_matches_for(str, options = {})
       #@matcher.sorted_matches_for str, options
-      uri = URI.parse("http://localhost:10120/#{str}")
+      uri = URI.parse("http://localhost:10121/#{str}")
       lines = Net::HTTP.get_response(uri).body
       lines.split("\n")
     end
